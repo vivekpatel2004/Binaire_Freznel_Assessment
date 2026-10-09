@@ -22,6 +22,13 @@ class TMDBApi {
     return `${CACHE_PREFIX}${endpoint}?${query.toString()}`;
   }
 
+  getTrendingMovies(page = 1) {
+    return this.request("/trending/movie/day", {
+      language: "en-US",
+      page,
+    });
+  }
+
   readCache(key) {
     try {
       const saved = localStorage.getItem(key);
@@ -50,7 +57,7 @@ class TMDBApi {
         JSON.stringify({
           data,
           savedAt: Date.now(),
-        })
+        }),
       );
     } catch (error) {
       console.warn("Unable to save API cache:", error);
@@ -75,7 +82,7 @@ class TMDBApi {
       }
 
       throw new Error(
-        "No saved movies are available yet. Connect to the internet once to cache movies for offline use."
+        "No saved movies are available yet. Connect to the internet once to cache movies for offline use.",
       );
     }
 
@@ -151,9 +158,7 @@ class TMDBApi {
   }
 
   getImageUrl(path, size = "w500") {
-    return path
-      ? `https://image.tmdb.org/t/p/${size}${path}`
-      : "";
+    return path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
   }
 }
 
