@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dev-dist/
+.env
+.env.*
+!.env.example
+firebase-debug.log
+package.json.bak
+tsconfig.json.bak
