@@ -133,7 +133,7 @@ export default function HeroBanner({
         try {
           localStorage.removeItem(ROTATION_KEY);
         } catch {
-          // Ignore storage errors.
+          
         }
 
         const currentSession = getRotationSession(new Date());
@@ -154,7 +154,7 @@ export default function HeroBanner({
             }),
           );
         } catch {
-          // The banner still works when localStorage is unavailable.
+          
         }
       },
       Math.max(0, nextResetAt - Date.now()),
