@@ -1,55 +1,110 @@
+
 import { useEffect, useMemo, useState } from "react";
 import { Film, Play, Search } from "lucide-react";
 import tmdbApi from "../../api/TMDBApi";
 
 const ROTATION_KEY = "cinescope-hero-rotation";
+const DAILY_CACHE_KEY = "cinescope-hero-daily-movies";
 const RESET_HOUR = 12;
 
-function getNextResetTime(now = new Date()) {
-  const nextReset = new Date(now);
-  nextReset.setHours(RESET_HOUR, 0, 0, 0);
+const imageUrl = (path, size = "w500") => {
+  return path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
+};
 
-  if (now >= nextReset) {
-    nextReset.setDate(nextReset.getDate() + 1);
-  }
-
-  return nextReset.getTime();
-}
-
+// Daily session changes at 12 PM local time.
 function getRotationSession(now = new Date()) {
-  const resetBoundary = new Date(now);
-  resetBoundary.setHours(RESET_HOUR, 0, 0, 0);
+  const boundary = new Date(now);
+  boundary.setHours(RESET_HOUR, 0, 0, 0);
 
-  if (now < resetBoundary) {
-    resetBoundary.setDate(resetBoundary.getDate() - 1);
+  if (now < boundary) {
+    boundary.setDate(boundary.getDate() - 1);
   }
 
-  return resetBoundary.getTime();
+  const year = boundary.getFullYear();
+  const month = String(boundary.getMonth() + 1).padStart(2, "0");
+  const day = String(boundary.getDate()).padStart(2, "0");
+
+  return `${year}-${month}-${day}`;
 }
 
-function getSavedRotation(candidateCount) {
+function getNextResetTime(now = new Date()) {
+  const next = new Date(now);
+  next.setHours(RESET_HOUR, 0, 0, 0);
+
+  if (now >= next) {
+    next.setDate(next.getDate() + 1);
+  }
+
+  return next.getTime();
+}
+
+function readStorage(key) {
   try {
-    const saved = localStorage.getItem(ROTATION_KEY);
-    if (!saved) return null;
-
-    const rotation = JSON.parse(saved);
-    const currentSession = getRotationSession();
-
-    if (
-      rotation.session !== currentSession ||
-      !Number.isInteger(rotation.index) ||
-      rotation.index < 0 ||
-      rotation.index >= candidateCount
-    ) {
-      localStorage.removeItem(ROTATION_KEY);
-      return null;
-    }
-
-    return rotation;
+    const value = localStorage.getItem(key);
+    return value ? JSON.parse(value) : null;
   } catch {
-    localStorage.removeItem(ROTATION_KEY);
     return null;
   }
+}
+
+function writeStorage(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    console.warn("Could not save hero cache:", error);
+  }
+}
+
+function getCachedMovies() {
+  const cached = readStorage(DAILY_CACHE_KEY);
+
+  return Array.isArray(cached?.results) ? cached.results : [];
+}
+
+function getSavedMovie(session, candidates) {
+  const saved = readStorage(ROTATION_KEY);
+
+  if (
+    !saved ||
+    saved.session !== session ||
+    !Array.isArray(candidates)
+  ) {
+    return null;
+  }
+
+  return (
+    candidates.find(
+      (movie) => String(movie.id) === String(saved.movieId)
+    ) ?? null
+  );
+}
+
+function chooseDailyMovie(candidates, session) {
+  if (!candidates.length) return null;
+
+  const savedMovie = getSavedMovie(session, candidates);
+
+  if (savedMovie) {
+    return savedMovie;
+  }
+
+  const index = Math.floor(Math.random() * candidates.length);
+  const selectedMovie = candidates[index];
+
+  writeStorage(ROTATION_KEY, {
+    movieId: selectedMovie.id,
+    session,
+  });
+
+  return selectedMovie;
+}
+
+function saveDailyMovies(results, session) {
+  writeStorage(DAILY_CACHE_KEY, {
+    session,
+    results,
+    savedAt: Date.now(),
+  });
 }
 
 export default function HeroBanner({
@@ -58,148 +113,195 @@ export default function HeroBanner({
   onExploreClick,
   onSearchClick,
 }) {
-  const [trendingMovies, setTrendingMovies] = useState([]);
-  const [heroIndex, setHeroIndex] = useState(0);
-  const [imageLoaded, setImageLoaded] = useState(false);
-
-  const featured = useMemo(
-    () => trendingMovies.filter((movie) => movie.backdrop_path),
-    [trendingMovies],
+  const [trendingMovies, setTrendingMovies] = useState(
+    () => getCachedMovies()
   );
 
-  const fallbackMovies = useMemo(
-    () => movies.filter((movie) => movie.backdrop_path),
-    [movies],
-  );
+  const [dailyMovie, setDailyMovie] = useState(() => {
+    const cached = getCachedMovies();
+    return getSavedMovie(getRotationSession(), cached);
+  });
 
-  const candidates = featured.length > 0 ? featured : fallbackMovies;
+  const featured = useMemo(() => {
+    return trendingMovies.filter(
+      (movie) => movie?.backdrop_path
+    );
+  }, [trendingMovies]);
 
+  const fallbackMovies = useMemo(() => {
+    return movies.filter(
+      (movie) => movie?.backdrop_path
+    );
+  }, [movies]);
+
+  const candidates =
+    featured.length > 0 ? featured : fallbackMovies;
+
+  // Fetch once per daily session and reuse the saved snapshot
+  // on refresh.
   useEffect(() => {
     let cancelled = false;
+    let resetTimeout;
 
-    async function loadTrendingMovies() {
+    async function loadDailyMovies(forceRefresh = false) {
+      const session = getRotationSession();
+      const cached = readStorage(DAILY_CACHE_KEY);
+
+      if (
+        !forceRefresh &&
+        cached?.session === session &&
+        Array.isArray(cached.results) &&
+        cached.results.length > 0
+      ) {
+        if (cancelled) return;
+
+        setTrendingMovies(cached.results);
+
+        const eligibleMovies = cached.results.filter(
+          (movie) => movie?.backdrop_path
+        );
+
+        setDailyMovie(
+          chooseDailyMovie(eligibleMovies, session)
+        );
+
+        return;
+      }
+
       try {
         const data = await tmdbApi.getTrendingMovies(1);
 
-        if (!cancelled) {
-          setTrendingMovies(data?.results ?? []);
+        if (cancelled) return;
+
+        const results = Array.isArray(data?.results)
+          ? data.results.filter(Boolean)
+          : [];
+
+        if (results.length > 0) {
+          saveDailyMovies(results, session);
+          setTrendingMovies(results);
+
+          const eligibleMovies = results.filter(
+            (movie) => movie?.backdrop_path
+          );
+
+          setDailyMovie(
+            chooseDailyMovie(eligibleMovies, session)
+          );
+        } else {
+          const previousMovies = getCachedMovies();
+
+          if (previousMovies.length > 0) {
+            setTrendingMovies(previousMovies);
+          }
         }
-      } catch {
-        if (!cancelled) {
-          setTrendingMovies([]);
+      } catch (error) {
+        console.error("Failed to fetch trending movies:", error);
+
+        if (cancelled) return;
+
+        const previousMovies = getCachedMovies();
+
+        if (previousMovies.length > 0) {
+          setTrendingMovies(previousMovies);
         }
       }
     }
 
-    loadTrendingMovies();
+    function scheduleNextReset() {
+      resetTimeout = window.setTimeout(async () => {
+        try {
+          localStorage.removeItem(DAILY_CACHE_KEY);
+          localStorage.removeItem(ROTATION_KEY);
+        } catch {
+          // The component can work without localStorage.
+        }
+
+        if (cancelled) return;
+
+        await loadDailyMovies(true);
+
+        if (!cancelled) {
+          scheduleNextReset();
+        }
+      }, Math.max(0, getNextResetTime() - Date.now()));
+    }
+
+    loadDailyMovies();
+    scheduleNextReset();
 
     return () => {
       cancelled = true;
+      window.clearTimeout(resetTimeout);
     };
   }, []);
 
- useEffect(() => {
-  if (!candidates.length) return;
-
-  let nextIndex = 0;
-
-  if (candidates.length > 1) {
-    do {
-      nextIndex = Math.floor(Math.random() * candidates.length);
-    } while (nextIndex === heroIndex);
-  }
-
-  setHeroIndex(nextIndex);
-
-  try {
-    localStorage.setItem(
-      ROTATION_KEY,
-      JSON.stringify({
-        index: nextIndex,
-        updatedAt: Date.now(),
-      })
-    );
-  } catch {
-    
-  }
-}, [candidates]);
-
+  // Use supplied movies if the trending API is unavailable.
   useEffect(() => {
-    if (!candidates.length) return;
+    if (!candidates.length) {
+      setDailyMovie(null);
+      return;
+    }
 
-    const nextResetAt = getNextResetTime();
-    const timeout = window.setTimeout(
-      () => {
-        try {
-          localStorage.removeItem(ROTATION_KEY);
-        } catch {
-          
-        }
+    const session = getRotationSession();
 
-        const currentSession = getRotationSession(new Date());
-        const nextIndex =
-          candidates.length > 1
-            ? Math.floor(Math.random() * candidates.length)
-            : 0;
+    setDailyMovie((currentMovie) => {
+      const existingMovie = candidates.find(
+        (movie) =>
+          String(movie.id) === String(currentMovie?.id)
+      );
 
-        setHeroIndex(nextIndex);
+      if (existingMovie) {
+        return existingMovie;
+      }
 
-        try {
-          localStorage.setItem(
-            ROTATION_KEY,
-            JSON.stringify({
-              index: nextIndex,
-              session: currentSession,
-              nextResetAt: getNextResetTime(),
-            }),
-          );
-        } catch {
-          
-        }
-      },
-      Math.max(0, nextResetAt - Date.now()),
-    );
+      return chooseDailyMovie(candidates, session);
+    });
+  }, [candidates]);
 
-    return () => window.clearTimeout(timeout);
-  }, [candidates, heroIndex]);
-
-  const hero = candidates[heroIndex] ?? candidates[0];
-
-  const imageUrl = (path, size = "w500") =>
-    path ? `https://image.tmdb.org/t/p/${size}${path}` : "";
-
-  useEffect(() => {
-    setImageLoaded(false);
-  }, [hero?.id, hero?.backdrop_path]);
+  const hero =
+    candidates.find(
+      (movie) => String(movie.id) === String(dailyMovie?.id)
+    ) ??
+    dailyMovie ??
+    candidates[0] ??
+    null;
 
   const featuredCards = candidates.slice(0, 4);
 
   return (
     <section className="relative mb-12 min-h-[420px] overflow-hidden rounded-3xl border border-white/10 bg-[#111827] sm:min-h-[490px]">
+      {/* Background fallback */}
       <div className="absolute inset-0 bg-[#161b22]" />
+
+      {/* Background image: visibility does not depend on React state */}
       {hero?.backdrop_path && (
         <img
-          key={hero.id}
+          key={`${hero.id}-${hero.backdrop_path}`}
           src={imageUrl(hero.backdrop_path, "w1280")}
           alt=""
           loading="eager"
           fetchPriority="high"
-          onLoad={() => setImageLoaded(true)}
           onError={(event) => {
-            event.currentTarget.style.display = "none";
-            setImageLoaded(false);
+            console.error(
+              "Hero background image failed:",
+              event.currentTarget.src
+            );
           }}
           className="absolute inset-0 h-full w-full object-cover opacity-45"
         />
       )}
 
+      {/* Image overlays */}
       <div className="absolute inset-0 bg-gradient-to-r from-[#0d1117] via-[#0d1117]/75 to-[#0d1117]/20" />
+
       <div className="absolute inset-0 bg-gradient-to-t from-[#0d1117] via-transparent to-transparent" />
 
       <div className="relative z-10 grid min-h-[420px] items-center gap-8 p-7 sm:min-h-[490px] sm:p-12 lg:grid-cols-[1fr_0.9fr]">
+        {/* Hero movie information */}
         <div
           key={hero?.id ?? "hero-content"}
-          className="max-w-2xl transition-opacity duration-700"
+          className="max-w-2xl"
         >
           <span className="inline-flex rounded-full border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-300">
             <Film size={17} className="mr-2" />
@@ -241,6 +343,7 @@ export default function HeroBanner({
           </div>
         </div>
 
+        
         <div className="grid grid-cols-2 items-center gap-3 sm:grid-cols-4 sm:gap-3">
           {featuredCards.map((movie, index) => (
             <button
